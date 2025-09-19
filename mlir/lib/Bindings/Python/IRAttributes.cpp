@@ -252,10 +252,13 @@ public:
           return PyAffineMapAttribute(affineMap.getContext(), attr);
         },
         nb::arg("affine_map"), "Gets an attribute wrapping an AffineMap.");
-    c.def_prop_ro("value", mlirAffineMapAttrGetValue,
-                  nb::sig("def value(self) -> " MAKE_MLIR_PYTHON_QUALNAME(
-                      "ir.AffineMap")),
-                  "Returns the value of the AffineMap attribute");
+    c.def_prop_ro(
+        "value",
+        [](PyAffineMapAttribute &self) {
+          return PyAffineMap(self.getContext(),
+                             mlirAffineMapAttrGetValue(self));
+        },
+        "Returns the value of the AffineMap attribute");
   }
 };
 
@@ -482,19 +485,19 @@ public:
 
     PyArrayAttributeIterator &dunderIter() { return *this; }
 
-    MlirAttribute dunderNext() {
+    nb::typed<nb::object, PyAttribute> dunderNext() {
       // TODO: Throw is an inefficient way to stop iteration.
       if (nextIndex >= mlirArrayAttrGetNumElements(attr.get()))
         throw nb::stop_iteration();
-      return mlirArrayAttrGetElement(attr.get(), nextIndex++);
+      return PyAttribute(this->attr.getContext(),
+                         mlirArrayAttrGetElement(attr.get(), nextIndex++))
+          .maybeDownCast();
     }
 
     static void bind(nb::module_ &m) {
       nb::class_<PyArrayAttributeIterator>(m, "ArrayAttributeIterator")
           .def("__iter__", &PyArrayAttributeIterator::dunderIter)
-          .def("__next__", &PyArrayAttributeIterator::dunderNext,
-               nb::sig("def __next__(self) -> " MAKE_MLIR_PYTHON_QUALNAME(
-                   "ir.Attribute")));
+          .def("__next__", &PyArrayAttributeIterator::dunderNext);
     }
 
   private:
@@ -526,11 +529,8 @@ public:
          [](PyArrayAttribute &arr, intptr_t i) {
            if (i >= mlirArrayAttrGetNumElements(arr))
              throw nb::index_error("ArrayAttribute index out of range");
-           return arr.getItem(i);
-         },
-         nb::sig(
-             "def __getitem__(self, arg: int, /) -> " MAKE_MLIR_PYTHON_QUALNAME(
-                 "ir.Attribute")))
+           return PyAttribute(arr.getContext(), arr.getItem(i)).maybeDownCast();
+         })
         .def("__len__",
              [](const PyArrayAttribute &arr) {
                return mlirArrayAttrGetNumElements(arr);
@@ -619,13 +619,9 @@ public:
                   "Returns the value of the integer attribute");
     c.def("__int__", toPyInt,
           "Converts the value of the integer attribute to a Python int");
-    c.def_prop_ro_static(
-        "static_typeid",
-        [](nb::object & /*class*/) -> MlirTypeID {
-          return mlirIntegerAttrGetTypeID();
-        },
-        nb::sig(
-            "def static_typeid(/) -> " MAKE_MLIR_PYTHON_QUALNAME("ir.TypeID")));
+    c.def_prop_ro_static("static_typeid", [](nb::object & /*class*/) {
+      return PyTypeID(mlirIntegerAttrGetTypeID());
+    });
   }
 
 private:
@@ -668,8 +664,8 @@ public:
   static constexpr const char *pyClassName = "SymbolRefAttr";
   using PyConcreteAttribute::PyConcreteAttribute;
 
-  static MlirAttribute fromList(const std::vector<std::string> &symbols,
-                                PyMlirContext &context) {
+  static PySymbolRefAttribute fromList(const std::vector<std::string> &symbols,
+                                       PyMlirContext &context) {
     if (symbols.empty())
       throw std::runtime_error("SymbolRefAttr must be composed of at least "
                                "one symbol.");
@@ -679,23 +675,21 @@ public:
       referenceAttrs.push_back(
           mlirFlatSymbolRefAttrGet(context.get(), toMlirStringRef(symbols[i])));
     }
-    return mlirSymbolRefAttrGet(context.get(), rootSymbol,
-                                referenceAttrs.size(), referenceAttrs.data());
+    return PySymbolRefAttribute(context.getRef(),
+                                mlirSymbolRefAttrGet(context.get(), rootSymbol,
+                                                     referenceAttrs.size(),
+                                                     referenceAttrs.data()));
   }
 
   static void bindDerived(ClassTy &c) {
-    c
-        .def_static(
-            "get",
-            [](const std::vector<std::string> &symbols,
-               DefaultingPyMlirContext context) {
-              return PySymbolRefAttribute::fromList(symbols, context.resolve());
-            },
-            nb::arg("symbols"), nb::arg("context") = nb::none(),
-            // clang-format off
-            nb::sig("def get(symbols: Sequence[str], context: " MAKE_MLIR_PYTHON_QUALNAME("ir.Context") " | None = None) -> " MAKE_MLIR_PYTHON_QUALNAME("ir.Attribute")),
-            // clang-format on
-            "Gets a uniqued SymbolRef attribute from a list of symbol names");
+    c.def_static(
+        "get",
+        [](const std::vector<std::string> &symbols,
+           DefaultingPyMlirContext context) {
+          return PySymbolRefAttribute::fromList(symbols, context.resolve());
+        },
+        nb::arg("symbols"), nb::arg("context") = nb::none(),
+        "Gets a uniqued SymbolRef attribute from a list of symbol names");
     c.def_prop_ro(
         "value",
         [](PySymbolRefAttribute &self) {
@@ -1067,16 +1061,14 @@ public:
                      [](PyDenseElementsAttribute &self) -> bool {
                        return mlirDenseElementsAttrIsSplat(self);
                      })
-        .def(
-            "get_splat_value",
-            [](PyDenseElementsAttribute &self) {
-              if (!mlirDenseElementsAttrIsSplat(self))
-                throw nb::value_error(
-                    "get_splat_value called on a non-splat attribute");
-              return mlirDenseElementsAttrGetSplatValue(self);
-            },
-            nb::sig("def get_splat_value(self) -> " MAKE_MLIR_PYTHON_QUALNAME(
-                "ir.Attribute")));
+        .def("get_splat_value", [](PyDenseElementsAttribute &self) {
+          if (!mlirDenseElementsAttrIsSplat(self))
+            throw nb::value_error(
+                "get_splat_value called on a non-splat attribute");
+          return PyAttribute(self.getContext(),
+                             mlirDenseElementsAttrGetSplatValue(self))
+              .maybeDownCast();
+        });
   }
 
   static PyType_Slot slots[];
@@ -1581,18 +1573,13 @@ public:
         },
         nb::arg("value") = nb::dict(), nb::arg("context") = nb::none(),
         "Gets an uniqued dict attribute");
-    c.def(
-        "__getitem__",
-        [](PyDictAttribute &self, const std::string &name) {
-          MlirAttribute attr =
-              mlirDictionaryAttrGetElementByName(self, toMlirStringRef(name));
-          if (mlirAttributeIsNull(attr))
-            throw nb::key_error("attempt to access a non-existent attribute");
-          return attr;
-        },
-        nb::sig(
-            "def __getitem__(self, arg: str, /) -> " MAKE_MLIR_PYTHON_QUALNAME(
-                "ir.Attribute")));
+    c.def("__getitem__", [](PyDictAttribute &self, const std::string &name) {
+      MlirAttribute attr =
+          mlirDictionaryAttrGetElementByName(self, toMlirStringRef(name));
+      if (mlirAttributeIsNull(attr))
+        throw nb::key_error("attempt to access a non-existent attribute");
+      return PyAttribute(self.getContext(), attr).maybeDownCast();
+    });
     c.def("__getitem__", [](PyDictAttribute &self, intptr_t index) {
       if (index < 0 || index >= self.dunderLen()) {
         throw nb::index_error("attempt to access out of bounds attribute");
@@ -1658,10 +1645,10 @@ public:
         },
         nb::arg("value"), nb::arg("context") = nb::none(),
         "Gets a uniqued Type attribute");
-    c.def_prop_ro(
-        "value",
-        [](PyTypeAttribute &self) { return mlirTypeAttrGetValue(self.get()); },
-        nb::sig("def value(self) -> " MAKE_MLIR_PYTHON_QUALNAME("ir.Type")));
+    c.def_prop_ro("value", [](PyTypeAttribute &self) {
+      return PyType(self.getContext(), mlirTypeAttrGetValue(self.get()))
+          .maybeDownCast();
+    });
   }
 };
 

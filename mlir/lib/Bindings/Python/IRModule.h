@@ -599,6 +599,7 @@ public:
 /// drops to zero or it is attached to a parent, at which point its lifetime
 /// is bounded by its top-level parent reference.
 class PyOperation;
+class PyOpView;
 using PyOperationRef = PyObjectRef<PyOperation>;
 class PyOperation : public PyOperationBase, public BaseContextObject {
 public:
@@ -678,7 +679,7 @@ public:
          PyLocation &location, const nanobind::object &ip, bool inferType);
 
   /// Creates an OpView suitable for this operation.
-  nanobind::object createOpView();
+  nanobind::typed<nanobind::object, PyOpView> createOpView();
 
   /// Erases the underlying MlirOperation, removes its pointer from the
   /// parent context's live operations map, and sets the valid bit false.
@@ -688,7 +689,7 @@ public:
   void setInvalid() { valid = false; }
 
   /// Clones this operation.
-  nanobind::object clone(const nanobind::object &ip);
+  nanobind::typed<nanobind::object, PyOpView> clone(const nanobind::object &ip);
 
   PyOperation(PyMlirContextRef contextRef, MlirOperation operation);
 
@@ -888,6 +889,8 @@ public:
   /// is taken by calling this function.
   static PyType createFromCapsule(nanobind::object capsule);
 
+  nanobind::typed<nanobind::object, PyType> maybeDownCast();
+
 private:
   MlirType type;
 };
@@ -1019,6 +1022,8 @@ public:
   /// may be a pre-existing object. Ownership of the underlying MlirAttribute
   /// is taken by calling this function.
   static PyAttribute createFromCapsule(nanobind::object capsule);
+
+  nanobind::typed<nanobind::object, PyAttribute> maybeDownCast();
 
 private:
   MlirAttribute attr;
@@ -1168,7 +1173,7 @@ public:
   /// Gets a capsule wrapping the void* within the MlirValue.
   nanobind::object getCapsule();
 
-  nanobind::object maybeDownCast();
+  nanobind::typed<nanobind::object, PyValue> maybeDownCast();
 
   /// Creates a PyValue from the MlirValue wrapped by a capsule. Ownership of
   /// the underlying MlirValue is still tied to the owning operation.
@@ -1259,7 +1264,8 @@ public:
 
   /// Returns the symbol (opview) with the given name, throws if there is no
   /// such symbol in the table.
-  nanobind::object dunderGetItem(const std::string &name);
+  nanobind::typed<nanobind::object, PyOpView>
+  dunderGetItem(const std::string &name);
 
   /// Removes the given operation from the symbol table and erases it.
   void erase(PyOperationBase &symbol);

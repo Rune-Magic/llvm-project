@@ -513,7 +513,7 @@ public:
 
   PyOperationIterator &dunderIter() { return *this; }
 
-  nb::object dunderNext() {
+  nb::typed<nb::object, PyOpView> dunderNext() {
     parentOperation->checkValid();
     if (mlirOperationIsNull(next)) {
       throw nb::stop_iteration();
@@ -562,7 +562,7 @@ public:
     return count;
   }
 
-  nb::object dunderGetItem(intptr_t index) {
+  nb::typed<nb::object, PyOpView> dunderGetItem(intptr_t index) {
     parentOperation->checkValid();
     if (index < 0) {
       index += dunderLen();
@@ -598,7 +598,7 @@ class PyOpOperand {
 public:
   PyOpOperand(MlirOpOperand opOperand) : opOperand(opOperand) {}
 
-  nb::object getOwner() {
+  PyOpView getOwner() {
     MlirOperation owner = mlirOpOperandGetOwner(opOperand);
     PyMlirContextRef context =
         PyMlirContext::forContext(mlirOperationGetContext(owner));
@@ -1534,7 +1534,7 @@ nb::object PyOperation::create(std::string_view name,
   return created.getObject();
 }
 
-nb::object PyOperation::clone(const nb::object &maybeIp) {
+nb::typed<nb::object, PyOpView> PyOperation::clone(const nb::object &maybeIp) {
   MlirOperation clonedOperation = mlirOperationClone(operation);
   PyOperationRef cloned =
       PyOperation::createDetached(getContext(), clonedOperation);
@@ -1543,7 +1543,7 @@ nb::object PyOperation::clone(const nb::object &maybeIp) {
   return cloned->createOpView();
 }
 
-nb::object PyOperation::createOpView() {
+nb::typed<nb::object, PyOpView> PyOperation::createOpView() {
   checkValid();
   MlirIdentifier ident = mlirOperationGetName(get());
   MlirStringRef identStr = mlirIdentifierStr(ident);
@@ -1638,12 +1638,14 @@ public:
 
 /// Returns the list of types of the values held by container.
 template <typename Container>
-static std::vector<MlirType> getValueTypes(Container &container,
-                                           PyMlirContextRef &context) {
-  std::vector<MlirType> result;
+static std::vector<nb::typed<nb::object, PyType>>
+getValueTypes(Container &container, PyMlirContextRef &context) {
+  std::vector<nb::typed<nb::object, PyType>> result;
   result.reserve(container.size());
   for (int i = 0, e = container.size(); i < e; ++i) {
-    result.push_back(mlirValueGetType(container.getElement(i).get()));
+    result.push_back(PyType(context->getRef(),
+                            mlirValueGetType(container.getElement(i).get()))
+                         .maybeDownCast());
   }
   return result;
 }
@@ -1666,17 +1668,12 @@ public:
         operation(std::move(operation)) {}
 
   static void bindDerived(ClassTy &c) {
-    c.def_prop_ro(
-        "types",
-        [](PyOpResultList &self) {
-          return getValueTypes(self, self.operation->getContext());
-        },
-        nb::sig("def types(self) -> list[" MAKE_MLIR_PYTHON_QUALNAME(
-            "ir.Type") "]"));
-    c.def_prop_ro(
-        "owner",
-        [](PyOpResultList &self) { return self.operation->createOpView(); },
-        nb::sig("def owner(self) -> " MAKE_MLIR_PYTHON_QUALNAME("ir.OpView")));
+    c.def_prop_ro("types", [](PyOpResultList &self) {
+      return getValueTypes(self, self.operation->getContext());
+    });
+    c.def_prop_ro("owner", [](PyOpResultList &self) {
+      return self.operation->createOpView();
+    });
   }
 
   PyOperationRef &getOperation() { return operation; }
@@ -2136,6 +2133,20 @@ PyAttribute PyAttribute::createFromCapsule(nb::object capsule) {
       PyMlirContext::forContext(mlirAttributeGetContext(rawAttr)), rawAttr);
 }
 
+nb::typed<nb::object, PyAttribute> PyAttribute::maybeDownCast() {
+  MlirTypeID mlirTypeID = mlirAttributeGetTypeID(this->get());
+  assert(!mlirTypeIDIsNull(mlirTypeID) &&
+         "mlirTypeID was expected to be non-null.");
+  std::optional<nb::callable> typeCaster = PyGlobals::get().lookupTypeCaster(
+      mlirTypeID, mlirAttributeGetDialect(this->get()));
+  // nb::rv_policy::move means use std::move to move the return value
+  // contents into a new instance that will be owned by Python.
+  nb::object thisObj = nb::cast(this, nb::rv_policy::move);
+  if (!typeCaster)
+    return thisObj;
+  return typeCaster.value()(thisObj);
+}
+
 //------------------------------------------------------------------------------
 // PyNamedAttribute.
 //------------------------------------------------------------------------------
@@ -2168,6 +2179,20 @@ PyType PyType::createFromCapsule(nb::object capsule) {
                 rawType);
 }
 
+nb::typed<nb::object, PyType> PyType::maybeDownCast() {
+  MlirTypeID mlirTypeID = mlirTypeGetTypeID(this->get());
+  assert(!mlirTypeIDIsNull(mlirTypeID) &&
+         "mlirTypeID was expected to be non-null.");
+  std::optional<nb::callable> typeCaster = PyGlobals::get().lookupTypeCaster(
+      mlirTypeID, mlirTypeGetDialect(this->get()));
+  // nb::rv_policy::move means use std::move to move the return value
+  // contents into a new instance that will be owned by Python.
+  nb::object thisObj = nb::cast(this, nb::rv_policy::move);
+  if (!typeCaster)
+    return thisObj;
+  return typeCaster.value()(thisObj);
+}
+
 //------------------------------------------------------------------------------
 // PyTypeID.
 //------------------------------------------------------------------------------
@@ -2194,7 +2219,7 @@ nb::object PyValue::getCapsule() {
   return nb::steal<nb::object>(mlirPythonValueToCapsule(get()));
 }
 
-nb::object PyValue::maybeDownCast() {
+nanobind::typed<nanobind::object, PyValue> PyValue::maybeDownCast() {
   MlirType type = mlirValueGetType(get());
   MlirTypeID mlirTypeID = mlirTypeGetTypeID(type);
   assert(!mlirTypeIDIsNull(mlirTypeID) &&
@@ -2238,7 +2263,8 @@ PySymbolTable::PySymbolTable(PyOperationBase &operation)
   }
 }
 
-nb::object PySymbolTable::dunderGetItem(const std::string &name) {
+nb::typed<nb::object, PyOpView>
+PySymbolTable::dunderGetItem(const std::string &name) {
   operation->checkValid();
   MlirOperation symbol = mlirSymbolTableLookup(
       symbolTable, mlirStringRefCreate(name.data(), name.length()));
@@ -2427,13 +2453,9 @@ public:
         operation(std::move(operation)), block(block) {}
 
   static void bindDerived(ClassTy &c) {
-    c.def_prop_ro(
-        "types",
-        [](PyBlockArgumentList &self) {
-          return getValueTypes(self, self.operation->getContext());
-        },
-        nb::sig("def types(self) -> list[" MAKE_MLIR_PYTHON_QUALNAME(
-            "ir.Type") "]"));
+    c.def_prop_ro("types", [](PyBlockArgumentList &self) {
+      return getValueTypes(self, self.operation->getContext());
+    });
   }
 
 private:
@@ -4037,21 +4059,9 @@ void mlir::python::populateIRCore(nb::module_ &m) {
           },
           nb::sig(
               "def typeid(self) -> " MAKE_MLIR_PYTHON_QUALNAME("ir.TypeID")))
-      .def(
-          MLIR_PYTHON_MAYBE_DOWNCAST_ATTR,
-          [](PyAttribute &self) {
-            MlirTypeID mlirTypeID = mlirAttributeGetTypeID(self);
-            assert(!mlirTypeIDIsNull(mlirTypeID) &&
-                   "mlirTypeID was expected to be non-null.");
-            std::optional<nb::callable> typeCaster =
-                PyGlobals::get().lookupTypeCaster(
-                    mlirTypeID, mlirAttributeGetDialect(self));
-            if (!typeCaster)
-              return nb::cast(self);
-            return typeCaster.value()(self);
-          },
-          nb::sig("def maybe_downcast(self) -> " MAKE_MLIR_PYTHON_QUALNAME(
-              "ir.Attribute")));
+      .def(MLIR_PYTHON_MAYBE_DOWNCAST_ATTR, &PyAttribute::maybeDownCast,
+           nb::sig("def maybe_downcast(self) -> " MAKE_MLIR_PYTHON_QUALNAME(
+               "ir.Attribute")));
 
   //----------------------------------------------------------------------------
   // Mapping of PyNamedAttribute
@@ -4148,21 +4158,7 @@ void mlir::python::populateIRCore(nb::module_ &m) {
              printAccum.parts.append(")");
              return printAccum.join();
            })
-      .def(
-          MLIR_PYTHON_MAYBE_DOWNCAST_ATTR,
-          [](PyType &self) {
-            MlirTypeID mlirTypeID = mlirTypeGetTypeID(self);
-            assert(!mlirTypeIDIsNull(mlirTypeID) &&
-                   "mlirTypeID was expected to be non-null.");
-            std::optional<nb::callable> typeCaster =
-                PyGlobals::get().lookupTypeCaster(mlirTypeID,
-                                                  mlirTypeGetDialect(self));
-            if (!typeCaster)
-              return nb::cast(self);
-            return typeCaster.value()(self);
-          },
-          nb::sig("def maybe_downcast(self) -> " MAKE_MLIR_PYTHON_QUALNAME(
-              "ir.Type")))
+      .def(MLIR_PYTHON_MAYBE_DOWNCAST_ATTR, &PyType::maybeDownCast)
       .def_prop_ro(
           "typeid",
           [](PyType &self) -> MlirTypeID {
